@@ -264,6 +264,11 @@ app.get('/owner/supervisors', auth, async (req, res) => {
 ========================= */
 // ✅ Alias route عشان الموقع اللي يطلب /ask-ai يشتغل بدون ما نغير الفرونت
 
+/* =========================
+   🔹 AI - Copilot (Gemini)
+   (تم دمج المسارات لتجنب التعارض مع الإبقاء على اسم الموديل كما هو)
+========================= */
+
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "https://app.techhaj.com");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
@@ -271,6 +276,7 @@ app.use((req, res, next) => {
   if (req.method === "OPTIONS") return res.sendStatus(200);
   next();
 });
+
 app.post('/ai/copilot', auth, async (req, res) => {
   try {
     if (!genAI) {
@@ -278,17 +284,17 @@ app.post('/ai/copilot', auth, async (req, res) => {
     }
 
     const body = req.body || {};
-
-    // ✅ هذا هو الشكل الحقيقي اللي الفرونت بيرسله (حسب صورتك)
-    // { issue, system, level_tap, level_gb, optic_power, fittings_gb_changed }
-    const issue = body.issue || body.problem || body.text || body.prompt || body.message || "";
-    const system = body.system || "";
-    const levelTap = body.level_tap ?? "";
+    
+    // دمج المدخلات لضمان قبول كافة أنواع الطلبات من الفرونت
+    let input = body.input || {};
+    const issue = body.issue || body.problem || body.text || body.prompt || body.message || body.query || input.symptoms || "";
+    const system = body.system || input.service || "";
+    const levelTap = body.level_tap ?? input.modem ?? "";
     const levelGb = body.level_gb ?? "";
     const opticPower = body.optic_power ?? "";
-    const fittingsChanged = body.fittings_gb_changed ?? "";
+    const fittingsChanged = body.fittings_gb_changed ?? input.notes ?? "";
 
-    if (!issue) {
+    if (!issue && !input.symptoms) {
       return res.status(400).json({ success: false, message: "Missing input" });
     }
 
@@ -323,7 +329,6 @@ ${JSON.stringify(safeInput)}
     const result = await model.generateContent(prompt);
     const textOut = result?.response?.text() || "";
 
-    // ✅ استخراج JSON حتى لو الموديل حط كلام قبله/بعده
     let cleaned = textOut.trim();
     const first = cleaned.indexOf("{");
     const last = cleaned.lastIndexOf("}");
@@ -331,8 +336,6 @@ ${JSON.stringify(safeInput)}
 
     try {
       const json = JSON.parse(cleaned);
-
-      // ✅ رجّع الشكل اللي الفرونت يتوقعه مباشرة
       return res.json({
         summary: String(json.summary || ""),
         steps: Array.isArray(json.steps) ? json.steps.slice(0, 3) : [],
@@ -340,7 +343,6 @@ ${JSON.stringify(safeInput)}
         when_to_escalate: Array.isArray(json.when_to_escalate) ? json.when_to_escalate.slice(0, 3) : [],
       });
     } catch {
-      // ✅ fallback مضمون بدل ما الفرونت يعلق
       return res.json({
         summary: clampText(textOut, 200),
         steps: [],
@@ -358,92 +360,15 @@ ${JSON.stringify(safeInput)}
     });
   }
 });
+
+/* ================================================================
+   تم تحويل المسار المكرر أدناه إلى تعليق لتجنب تضارب الطلبات
+   ================================================================
+   
 app.post('/ai/copilot', auth, async (req, res) => {
-  try {
-    const body = req.body || {};
-
-    // ✅ يدعم أكثر من شكل للبيانات القادمة من الفرونت
-    let input = body.input;
-
-    // لو الفرونت ببعث prompt أو message أو query
-    if (!input && (body.prompt || body.text || body.message || body.query)) {
-      const msg = body.prompt || body.text || body.message || body.query;
-      input = { service: "", modem: "", symptoms: String(msg), notes: "" };
-    }
-
-    // لو الفرونت ببعث النص داخل field اسمه problem أو issue
-    if (!input && (body.problem || body.issue)) {
-      const msg = body.problem || body.issue;
-      input = { service: "", modem: "", symptoms: String(msg), notes: "" };
-    }
-
-    // لو الفرونت ببعث مباشرة {service, modem, symptoms, notes}
-    if (!input && (body.service || body.modem || body.symptoms || body.notes)) {
-      input = {
-        service: body.service || "",
-        modem: body.modem || "",
-        symptoms: body.symptoms || "",
-        notes: body.notes || ""
-      };
-    }
-
-    // آخر حل: إذا وصل body فاضي تمام
-    if (!input) {
-      return res.status(400).json({ success: false, message: "Missing input" });
-    }
-
-    const safeInput = {
-      service: clampText(input.service, 80),
-      modem: clampText(input.modem, 80),
-      symptoms: clampText(input.symptoms, 1500),
-      notes: clampText(input.notes, 2000),
-    };
-
-    const model = genAI.getGenerativeModel({
-      model: "models/gemini-flash-latest",
-      generationConfig: {
-        temperature: 0.1,
-        maxOutputTokens: 600,
-        responseMimeType: "application/json"
-      },
-    });
-
-    const prompt = `
-Give me ONLY ONE LINE JSON (no markdown, no extra text).
-Keys exactly: summary, steps, likely_causes, when_to_escalate.
-steps/likely_causes/when_to_escalate must be arrays of short strings.
-Keep summary under 120 characters. Keep each array max 3 items.
-
-Input:
-${JSON.stringify(safeInput)}
-`.trim();
-
-    const result = await model.generateContent(prompt);
-    const text = result?.response?.text() || "";
-
-    // نحاول نطلع أول JSON block
-    let cleaned = text.trim();
-
-    const first = cleaned.indexOf("{");
-    const last = cleaned.lastIndexOf("}");
-
-    if (first !== -1 && last !== -1 && last > first) {
-      cleaned = cleaned.slice(first, last + 1);
-    }
-
-    try {
-      const json = JSON.parse(cleaned);
-      return res.json(json);
-    } catch (e) {
-      return res.json({ success: true, raw: text });
-    }
-
-
-  } catch (e) {
-    console.error("AI error:", e);
-    return res.status(500).json({ success: false, message: "AI failed", error: String(e?.message || e) });
-  }
+    // الكود الأصلي الثاني هنا..
 });
+*/
 
 /* =========================
    🔹 Catch All
